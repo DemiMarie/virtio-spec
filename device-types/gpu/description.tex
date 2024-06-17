@@ -21,7 +21,7 @@ cursors and multiple scanouts (aka heads).
 
 Both queues have the same format.  Each request and each response have
 a fixed header, followed by command specific data fields.  The
-separate cursor queue is the "fast track" for cursor commands
+separate cursor queue is the ``fast track'' for cursor commands
 (VIRTIO_GPU_CMD_UPDATE_CURSOR and VIRTIO_GPU_CMD_MOVE_CURSOR), so they
 go through without being delayed by time-consuming commands in the
 control queue.
@@ -61,7 +61,7 @@ struct virtio_gpu_config {
 \item[\field{events_read}] signals pending events to the driver.  The
   driver MUST NOT write to this field.
 \item[\field{events_clear}] clears pending events in the device.
-  Writing a '1' into a bit will clear the corresponding bit in
+  Writing a `1' into a bit will clear the corresponding bit in
   \field{events_read}, mimicking write-to-clear behavior.
 \item[\field{num_scanouts}] specifies the maximum number of scanouts
   supported by the device.  Minimum value is 1, maximum value is 16.
@@ -104,7 +104,7 @@ enum virtio_gpu_shm_id {
 \end{lstlisting}
 
 The shared memory region with VIRTIO_GPU_SHM_ID_HOST_VISIBLE is referred as
-the "host visible memory region".  The device MUST support the
+the ``host visible memory region''.  The device MUST support the
 VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB and VIRTIO_GPU_CMD_RESOURCE_UNMAP_BLOB
 if the host visible memory region is available.
 
@@ -635,11 +635,11 @@ A blob resource is a container for:
 
   \begin{itemize*}
   \item a guest memory allocation (referred to as a
-  "guest-only blob resource").
+  ``guest-only blob resource'').
   \item a host memory allocation (referred to as a
-  "host-only blob resource").
+  ``host-only blob resource'').
   \item a guest memory and host memory allocation (referred
-  to as a "default blob resource").
+  to as a ``default blob resource'').
   \end{itemize*}
 
 The memory properties of the blob resource MUST be described by
