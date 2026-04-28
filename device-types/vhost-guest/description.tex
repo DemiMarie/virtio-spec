@@ -1,0 +1,639 @@
+\section{Vhost-Guest Device}\label{sec:Device Types / Vhost-Guest Device}
+
+The virtio vhost-guest device facilitates vhost-user device
+emulation through vhost-user protocol exchanges and access to
+shared memory. Software-defined networking, storage, and other
+I/O appliances can provide services through the device.
+
+This section relies on definitions from the
+\hyperref[intro:Vhost-user Protocol]{vhost-user protocol}.
+Knowledge of the vhost-user protocol is a prerequisite for
+understanding this device.
+
+The \hyperref[intro:Vhost-user Protocol]{vhost-user protocol}
+was originally designed for processes on a single system
+communicating over UNIX domain sockets. The vhost-guest device
+allows the vhost-user backend to communicate with the vhost-user
+frontend over the device instead of a UNIX domain socket. This
+allows the backend and frontend to run on two separate systems,
+such as a virtual machine and a hypervisor. The vhost-user
+backend program exchanges vhost-user protocol messages with the
+vhost-user frontend through the device.
+
+How the device implementation communicates with the vhost-user
+frontend is beyond the scope of this specification. However,
+it is expected that most implementations will use an AF_UNIX
+socket to relay messages to a vhost-user frontend process
+running on the same host.
+
+Existing vhost-user backend programs that communicate over UNIX
+domain sockets can support the vhost-guest device without
+invasive changes because the pre-existing vhost-user wire
+protocol is used. Vhost-user clients do not require modification.
+It is also possible to implement a relay that uses a vhost-guest
+device and listens on a vhost-user socket. This allows using
+unmodified vhost-user servers.
+
+\subsection{Terminology and Typical Operation}\label{sec:Device Types / Vhost-Guest Device / Terminology and Typical Operation}
+
+A system using vhost-guest will generally have multiple
+components arranged as follows:
+
+\begin{description}
+\item[Backend guest] The guest VM that is providing a vhost-user
+    device.
+
+\item[Backend server] A userspace process in the backend guest.
+    It transmits and receives vhost-user protocol messages via
+    the vhost-guest driver. It has direct access to the memory
+    shared by the frontend and may be able to send interrupts
+    directly to the frontend. This process does not always have
+    administrative privileges in the backend guest.
+
+\item[Vhost-guest driver] A kernel-mode driver in the backend
+    guest. It proxies messages between the backend server and the
+    vhost-guest device. It also provides an interface that the
+    backend server can use to map the frontend guest's memory.
+
+\item[Vhost-guest device] A virtio device implemented in a
+    userspace process on the host, typically the VMM running the
+    backend guest. It implements a vhost-user backend that
+    listens for connections on an AF_UNIX socket. It relays
+    messages between the vhost-user frontend and the vhost-guest
+    driver. It also exposes the frontend guest's memory to the
+    vhost-guest driver.
+
+\item[Vhost-user frontend] A component of the userspace VMM that
+    runs the frontend guest. It exposes a virtio device to the
+    frontend guest and uses the vhost-user protocol to
+    communicate with the vhost-guest device.
+
+\item[Frontend guest] The guest that uses the virtio device
+    implemented by the backend server.
+\end{description}
+
+Control messages, such as configuration space access and memory
+mapping, typically traverse all of the above components. Access
+to frontend guest memory typically bypasses the backend server,
+vhost-guest driver, vhost-guest device, and vhost-user frontend.
+Interrupts typically bypass the vhost-user frontend and
+vhost-guest device. They may bypass the vhost-guest driver in
+some configurations.
+
+The above component arrangement is not required by this
+specification. However, understanding it is necessary to
+understand design choices made in this specification.
+
+When this specification refers to the vhost-user device being
+implemented, this will always be identified via terms like
+``vhost-user'', ``implemented'', or ``frontend.''
+
+Any part of this specification that does not explicitly mention
+the implemented device refers to the vhost-guest device itself.
+
+\subsection{Device ID}\label{sec:Device Types / Vhost-Guest Device / Device ID}
+  53
+
+\subsection{Feature bits}\label{sec:Device Types / Vhost-Guest Device / Feature bits}
+
+The following feature bits are defined for the vhost-guest device
+itself:
+
+\begin{description}
+
+\item[VIRTIO_VHOST_GUEST_F_BIG_ENDIAN (0)]
+    If this feature bit is offered, vhost-user protocol messages
+    use big-endian byte order. If it is not offered, vhost-user
+    protocol messages use little-endian byte order.
+
+    \begin{note}
+    Typically, a driver running in a little-endian VM will refuse
+    to operate if VIRTIO_VHOST_GUEST_F_BIG_ENDIAN is offered, and
+    a driver running in a big-endian VM will refuse to operate if
+    VIRTIO_VHOST_GUEST_F_BIG_ENDIAN is not offered. This means
+    that the driver must be of the same endianness as the device.
+    This is almost always the case in practice.
+    \end{note}
+\end{description}
+
+Most feature negotiation instead happens via vhost-user's own
+mechanism. Details can be found in
+\ref{sec:Device Types / Vhost-Guest Device / Restrictions on Vhost-User Protocol Feature Negotiation}.
+
+\subsection{Device Configuration Layout}\label{sec:Device Types / Vhost-Guest Device / Device Configuration Layout}
+
+All fields are always available.
+
+\begin{lstlisting}
+struct virtio_vhost_guest_config {
+        /* Device implementation limits. */
+        le32 max_vhost_queues;
+        le32 max_message_size;
+        le32 max_migration_message_size;
+        le16 max_chained_rx_descriptors;
+        le16 max_chained_tx_descriptors;
+
+        /* Which device is this? */
+        u8 uuid[16];
+
+        /* Information about the particular device. */
+        le16 vhost_user_device_type;
+        le16 status;
+};
+\end{lstlisting}
+
+\begin{description}
+\item[\field{status}] contains the status of the vhost-user connection.
+    The default value of this field is 0.
+
+    The driver sets VIRTIO_VHOST_GUEST_STATUS_BACKEND_UP to
+    indicate readiness for the vhost-user frontend to connect.
+    The vhost-user frontend cannot connect until the driver
+    sets this bit. Typical implementations will delay either
+    bind() or accept() until this point.
+
+    The device sets VIRTIO_VHOST_GUEST_STATUS_FRONTEND_UP when the
+    vhost-user frontend connects. After this bit is set, the
+    driver can start sending and receiving vhost-user protocol
+    messages.
+
+    When the driver clears VIRTIO_VHOST_GUEST_BACKEND_UP while
+    the vhost-user frontend is connected, the vhost-user
+    frontend is disconnected. This will typically force the
+    frontend device into a NEEDS_RESET state.
+
+    When the vhost-user frontend disconnects,
+    both VIRTIO_VHOST_GUEST_STATUS_BACKEND_UP and
+    VIRTIO_VHOST_GUEST_STATUS_FRONTEND_UP are cleared by the
+    device. Communication can be restarted by the driver
+    setting VIRTIO_VHOST_GUEST_STATUS_BACKEND_UP again.
+
+    A configuration change notification is sent when the
+    device changes the status field, unless the change was caused
+    by a write by the driver to the field itself.
+
+\item[\field{max_vhost_queues}] is the maximum number of queues
+    that the vhost-user device may have. It is not related to the
+    number of queues supported by the vhost-guest device and is
+    generally much larger. Devices SHOULD set this field to the
+    largest number of virtqueues supported by the vhost-user
+    specification, unless resource constraints require a smaller
+    value.
+
+\item[\field{max_message_size}] is the maximum size of a
+    vhost-user message supported by this device. This field is
+    always at least 512.
+
+\item[\field{vhost_user_device_type}] is the expected type of
+    the vhost-user device. 0 is special and indicates that any
+    type is permissible.
+
+\item[\field{uuid}] is the Universally Unique Identifier (UUID)
+    for this device. If the device has no UUID, then this
+    field contains the nil UUID (all zeroes). The UUID
+    allows vhost-user backend programs to identify a specific
+    vhost-guest device among many without relying on bus
+    addresses.
+
+\item[\field{max_migration_message_size}] is the maximum size of
+    a message allowed on the migration queues (described below).
+
+\end{description}
+
+\devicenormative{\subsubsection}{Device Configuration Layout}{Device Types / Vhost-Guest Device / Device Configuration Layout}
+
+Devices MUST offer VIRTIO_F_VERSION_1 to indicate that the
+vhost-guest device is not a legacy device. Devices MUST set
+DEVICE_NEEDS_RESET if it is not accepted.
+
+Devices MUST support using reads of any size not exceeding 32
+bits to access the configuration space, provided they are
+naturally aligned. Such reads MUST return an atomic snapshot of
+the configuration space. Devices MUST support using 32-bit
+writes to write to both \field{status} and
+\field{vhost_user_device_type} in a single atomic operation.
+
+Devices MUST support 1-byte reads and writes to the bytes in
+\field{flags}.
+
+\field{max_chained_tx_descriptors} and
+\field{max_chained_rx_descriptors} MUST both be at least 1.
+
+Devices MUST NOT change \field{uuid} except when the device is
+reset.
+
+\drivernormative{\subsubsection}{Device Configuration Layout}{Device Types / Vhost-Guest Device / Device Configuration Layout}
+
+The driver MUST refuse to use the device if VIRTIO_F_VERSION_1 is
+not offered. The driver MUST accept VIRTIO_F_VERSION_1 if it is
+offered.
+
+The driver MUST NOT write to device configuration fields other
+than \field{status} and \field{vhost_user_device_type}.
+
+The driver MUST NOT chain more than
+\field{max_chained_tx_descriptors} device-readable descriptors.
+The driver MUST NOT chain more than
+\field{max_chained_rx_descriptors} device-writeable descriptors.
+If either of these fields are 0, the driver MUST refuse to
+operate the device.
+
+\subsection{Virtqueues}\label{sec:Device Types / Vhost-Guest Device / Virtqueues}
+
+The following virtqueues are always available:
+
+\begin{description}
+\item[0] front2back_requests (device-to-driver vhost-user requests)
+\item[1] front2back_replies (driver-to-device vhost-user replies)
+\item[2] back2front_replies (device-to-driver vhost-user replies)
+\item[3] back2front_requests (driver-to-device vhost-user requests)
+\end{description}
+
+If the implemented device has negotiated the
+VHOST_USER_PROTOCOL_F_DEVICE_STATE feature, the following
+virtqueues are available:
+
+\begin{description}
+\item[4] migration_send (migration state sending)
+\item[5] migration_send (migration state receiving)
+\end{description}
+
+\drivernormative{\subsubsection}{Virtqueues}{Device Types / Vhost-Guest Device / Virtqueues}
+
+The driver MUST NOT access the \field{migration_save} virtqueue or
+the \field{migration_load} virtqueue unless the implemented
+device has negotiated the VHOST_USER_PROTOCOL_F_DEVICE_STATE
+feature.
+
+The driver MUST NOT access the \field{migration_save} virtqueue
+unless a VHOST_USER_SET_DEVICE_STATE_FD message with direction
+set to 0 (Save) has been received.
+
+The driver MUST NOT access the \field{migration_load} virtqueue
+unless a VHOST_USER_SET_DEVICE_STATE_FD message with direction
+set to 1 (Load) has been received.
+
+\subsection{Device Initialization}\label{sec:Device Types / Vhost-Guest Device / Device Initialization}
+
+Initialization is partly described in
+\ref{sec:Device Types / Vhost-Guest Device / Device Configuration Layout}
+and partly in the normative statements below.
+
+\drivernormative{\subsubsection}{Device Initialization}{Device Types / Vhost-Guest Device / Device Initialization}
+
+The driver MUST fail feature negotiation if VIRTIO_F_VERSION_1 is
+not offered. The driver MUST accept VIRTIO_F_VERSION_1 if it is
+offered.
+
+If the VIRTIO_VHOST_GUEST_F_BIG_ENDIAN feature is offered by the
+device, the driver MUST accept it or refuse to finish feature
+negotiation.
+
+If the VIRTIO_VHOST_GUEST_F_BIG_ENDIAN feature is not offered by
+the device but is required by the driver, the driver MUST refuse
+to finish feature negotiation.
+
+\begin{note}
+Support for endian swapping in the device was considered but not
+included. The backend needs to be aware of each vhost-user
+protocol message, whereas the vhost-guest device does not.
+Therefore, byte-swapping in the backend is significantly simpler.
+The vast majority of use-cases don't require byte-swapping at
+all. Furthermore, supporting byte-swapping in the device would
+make feature negotiation significantly more complex.
+\end{note}
+
+The driver MUST read from \field{vhost_user_device_type} before
+writing to it or to \field{status}. If the read returns 0, the
+driver MUST write a nonzero value to
+\field{vhost_user_device_type} before writing to \field{status},
+or use a 32-bit write to write both at once. If the read returns
+nonzero, the driver MUST NOT write to
+\field{vhost_user_device_type}. The driver MUST do this before
+setting VIRTIO_VHOST_GUEST_BACKEND_UP.
+
+If the driver sets VIRTIO_VHOST_GUEST_BACKEND_UP, the driver MUST
+implement a device that conforms to the specification for a
+device of the type it read from vhost_user_device_type (if that
+is nonzero), or of the type that it wrote to
+vhost_user_device_type (if reading it returned zero). If the
+driver cannot do this (perhaps because the device type is one it
+does not implement), it MUST refuse to operate the device.
+
+The driver SHOULD check the \field{max_vhost_queues}
+configuration field to determine how many queues the
+vhost-user backend will be able to support.
+
+If a driver supports multiple vhost-guest the device and needs
+to differentiate them, it SHOULD use the \field{uuid}
+configuration field to allow vhost-user backend programs to
+identify a specific device among many.
+
+The driver SHOULD place at least one buffer in
+front2back_requests before setting the
+VIRTIO_VHOST_GUEST_BACKEND_UP bit in the \field{status}
+configuration field.
+
+The driver MUST handle virtqueue messages on front2back_requests
+notifications that occur before the configuration change
+notification. It is possible that a vhost-user protocol
+message from the vhost-user frontend arrives before the
+driver has seen the configuration change notification for the
+VIRTIO_VHOST_GUEST_STATUS_FRONTEND_UP \field{status} change.
+
+\subsection{Device Operation}\label{sec:Device Types / Vhost-Guest Device / Device Operation}
+
+Device operation consists of operating request queues, response
+queues, and migration queues.
+
+\subsubsection{Device Operation: Request And Response Queues}\label{sec:Device Types / Vhost-Guest Device / Device Operation / Device Operation: Request And Response Queues}
+
+The driver receives vhost-user requests from the vhost-user
+frontend on front2back_requests. The driver sends responses
+to the vhost-user frontend on back2front_replies.
+
+The driver sends vhost-user requests to the vhost-user frontend
+on back2front_requests. The driver receives responses from
+the vhost-user frontend on front2back_replies.
+
+All descriptors on front2back_requests and front2back_replies are
+write-only to the device. All descriptors on back2front_requests
+and back2front_replies are read-only to the device.
+
+Unless stated elsewhere in this specification, messages from the
+frontend to backend and backend to frontend are delivered without
+modification.
+
+Within a virtqueue, all messages are guaranteed to be delivered
+in-order. There is no ordering between virtqueues.
+
+Each buffer is a vhost-user protocol message as defined by
+the \hyperref[intro:Vhost-user Protocol]{vhost-user protocol}.
+
+If the VIRTIO_VHOST_GUEST_F_BIG_ENDIAN feature is negotiated,
+messages are in big-endian order. Otherwise, they are in
+little-endian order.
+
+\drivernormative{\paragraph}{Device Operation: Request And Response Queues}{Device Types / Vhost-Guest Device / Device Operation / Device Operation: Request And Response Queues}
+
+Descriptors placed on \field{back2front_requests},
+\field{back2front_replies}, and \field{migration_save} MUST be
+device-readable.
+
+Descriptors placed on \field{front2back_requests},
+\field{front2back_replies}, and \field{migration_load} MUST be
+device-writeable.
+
+Descriptors placed on front2back_requests and front2back_replies
+MUST have a length not less than the smaller of:
+
+\begin{enumerate}
+\item The contents of the \field{max_message_size}
+      configuration field.
+\item 4KiB.
+\end{enumerate}
+
+Descriptors placed on back2front_requests and back2front_replies
+MUST have a length that does not exceed \field{max_message_size}.
+
+The driver MUST ensure that each descriptor on back2front_requests
+and back2front_replies points to a valid and complete vhost-user
+protocol message that is appropriate for the queue that it is on.
+Padding at the end of a descriptor is not allowed.
+
+\devicenormative{\paragraph}{Device Operation: Request And Response Queues}{Device Types / Vhost-Guest Device / Device Operation / Device Operation: Request And Response Queues}
+
+Devices MUST ensure that the header of each message in
+\field{front2back_requests} and \field{front2back_replies}
+conforms to the
+\hyperref[intro:Vhost-user Protocol]{vhost-user protocol}.
+Violations MUST cause the device to set DEVICE_NEEDS_RESET.
+
+Devices MAY perform such checking on the body of the message. If
+they detect that the
+\hyperref[intro:Vhost-user Protocol]{vhost-user protocol} has
+been violated, they MAY set DEVICE_NEEDS_RESET.
+
+If a vhost-user protocol message does not fit in the buffer
+offered by the driver, the device MUST set DEVICE_NEEDS_RESET.
+
+\subsubsection{Device Operation: Migration Queues}\label{sec:Device Types / Vhost-Guest Device / Device Operation / Device Operation: Migration Queues}
+
+The driver receives incoming migration data on migration_receive.
+The driver sends migration data on migration_send.
+
+All descriptors on migration_receive are write-only to the
+device. All descriptors on migration_send are read-only to the
+device.
+
+Descriptors written to the migration_send queue are written to
+the migration pipe without modification. The device closes the
+migration pipe when it gets an empty descriptor.
+
+Data read from the inbound migration data pipe is written to
+descriptors on the migration_receive queue. EOF or error is
+indicated by writing zero bytes to a descriptor.
+
+\drivernormative{\paragraph}{Device Operation: Migration Queues}{Device Types / Vhost-Guest Device / Device Operation / Device Operation: Migration Queues}
+
+The driver MUST limit messages on \field{migration_send} to the
+value in the configuration field
+\field{max_migration_message_size}.
+
+Devices silently truncate the migration stream if an error
+occurs. If the driver did not use a prefix-free encoding for
+the migration stream, it would not be able to detect errors.
+Therefore, the driver MUST use a prefix-free encoding for
+migration streams.
+
+\subsubsection{Device Operation: File Descriptor Passing}\label{sec:Device Types / Vhost-Guest Device / Device Operation / Device Operation: File Descriptor Passing}
+
+File descriptor passing is handled differently by the vhost-user
+device backend. When a message is received that carries one
+or more file descriptors according to the vhost-user protocol,
+additional device resources become available to the driver, as
+described in \ref{sec:Device Types / Vhost-Guest Device / Additional Resources / Availability of Additional Resources}.
+
+\subsection{Additional Resources}\label{sec:Device Types / Vhost-Guest Device / Additional Resources}
+
+The vhost-guest device uses the following additional features of
+a virtio device beyond virtqueues and configuration space:
+
+\subsubsection{Device Auxiliary Notifications}\label{sec:Device Types / Vhost-Guest Device / Additional Resources / Device Auxiliary Notifications}
+
+Device auxiliary notifications are laid out as follows:
+
+\begin{description}
+\item[0] Vring call for vhost-user queue 0
+\item[\ldots]
+\item[N] Vring err for vhost-user queue 0
+\item[\ldots]
+\item[2N] Log
+\end{description}
+
+\subsubsection{Driver Auxiliary Notifications}\label{sec:Device Types / Vhost-Guest Device / Additional Resources / Driver Auxiliary Notifications}
+
+Driver auxiliary notifications are laid out as follows:
+
+\begin{description}
+\item[0] Vring kick for vhost-user queue 0
+\item[\ldots]
+\end{description}
+
+\subsubsection{Shared Memory}\label{sec:Device Types / Vhost-Guest Device / Additional Resources / Shared Memory}
+
+Shared memory offsets are chosen by the device. The device
+promises that they do not overlap. The device replaces the user
+address field in a vhost-user protocol message with the offset in
+the shared memory region. If a message has a guest address but no
+user address, the guest address is replaced instead.
+
+The driver MAY detect overlap. If it does, it SHOULD set FAILED.
+
+\subsubsection{Availability of Additional Resources}\label{sec:Device Types / Vhost-Guest Device / Additional Resources / Availability of Additional Resources}
+
+The following vhost-user protocol messages convey access to
+additional device resources:
+
+\begin{description}
+\item[VHOST_USER_SET_MEM_TABLE]
+    Contents of vhost memory regions are available to the
+    driver in shared memory. The user addresses in this message
+    have been replaced with offsets in the shared memory region.
+\item[VHOST_USER_ADD_MEM_REG]
+    A new vhost memory region is available to the driver in
+    shared memory. The user address in this message has been
+    replaced with an offset in the shared memory region.
+\item[VHOST_USER_REM_MEM_REG]
+    The frontend wishes to remove the vhost memory region
+    described by this message. The memory will remain available
+    until the driver replies to this message.
+\item[VHOST_USER_SET_LOG_BASE]
+    Contents of the log are available to the driver in shared
+    memory. The offset has been replaced with the offset in the
+    shared memory region.
+\item[VHOST_USER_SET_LOG_FD]
+    The log device auxiliary notification is available to the
+    driver. Using this notification before this message is
+    received has no effect.
+\item[VHOST_USER_GET_INFLIGHT_FD]
+    The inflight memory region is available to the driver. The
+    mmap offset has been replaced with the offset in the ring
+    buffer.
+\item[VHOST_USER_SET_INFLIGHT_FD]
+    The inflight memory region is available to the driver. The
+    mmap offset has been replaced with the offset in the ring
+    buffer.
+\item[VHOST_USER_SET_VRING_KICK]
+    The vring kick driver auxiliary notification for this queue
+    is available to the driver. If this notification is enabled,
+    it may trigger before the driver has processed this message.
+\item[VHOST_USER_SET_VRING_CALL]
+    The vring call device auxiliary notification for this queue
+    is available to the driver. Using this notification before
+    before this message is received has no effect.
+\item[VHOST_USER_SET_VRING_ERR]
+    The vring err device auxiliary notification for this queue
+    is available to the driver. Using this notification before
+    before this message is received has no effect.
+\item[VHOST_USER_SET_BACKEND_REQ_FD]
+    The driver may send vhost-user protocol backend messages on
+    back2front_requests. Putting buffers on back2front_requests
+    before this message is received is not allowed.
+\item[VHOST_USER_SET_DEVICE_STATE_FD]
+    The driver may send its migration state on migration_send or
+    receive them on migration_receive. This state consists of an
+    opaque stream of bytes. The first buffer may be placed on
+    migration_receive, and its corresponding notification
+    received by the driver, before this message arrives.
+\end{description}
+
+\drivernormative{\paragraph}{Availability of Additional Resources}{Device Types / Vhost-Guest Device / Additional Resources / Availability of Additional Resources}
+
+The driver MUST NOT place a buffer on back2front_requests until
+and unless VHOST_USER_SET_BACKEND_REQ_FD is received.
+
+The driver MUST NOT place a buffer on migration_send until and
+unless VHOST_USER_SET_DEVICE_STATE_FD is received with a
+transfer direction of ``load''.
+
+\devicenormative{\paragraph}{Availability of Additional Resources}{Device Types / Vhost-Guest Device / Additional Resources / Availability of Additional Resources}
+
+Devices MUST ensure all memory regions have non-overlapping
+$\left[user address, user address + size\right)$.
+
+Devices MUST ensure all memory regions have non-overlapping
+$\left[guest address, guest address + size\right)$.
+
+\subsubsection{Notifications}\label{sec:Device Types / Vhost-Guest Device / Additional Resources / Notifications}
+
+When the device has made a buffer available for the driver
+to process, it notifies the driver via a driver auxiliary
+notification. Therefore, only transports supporting driver
+auxiliary notifications are supported by this device.
+
+When the driver has made a buffer available for the device to
+process, it notifies the device via a device auxiliary
+notification. Therefore, only transports supporting device
+auxiliary notifications are supported by this device.
+
+\subsection{Restrictions on Vhost-User Protocol Feature Negotiation}\label{sec:Device Types / Vhost-Guest Device / Restrictions on Vhost-User Protocol Feature Negotiation}
+
+To ensure forward compatibility with future versions of the
+vhost-guest device, the set of vhost-user protocol features
+that can be negotiated is restricted.
+
+While many vhost-user protocol messages can be forwarded
+unchanged, not all can. For instance, vhost-user messages that
+carry file descriptors, guest addresses, or user addresses
+require special handling by the device. Devices may choose to not
+implement all of these messages. Furthermore, a device that does
+not know about a protocol feature does not know if it requires
+any special handling. Devices ensure that only supported
+protocol features are used by clearing protocol bits in
+VHOST_USER_GET_PROTOCOL_FEATURES replies and by validating
+VHOST_USER_SET_PROTOCOL_FEATURES against the protocol features
+supported by the device
+
+\devicenormative{\subsubsection}{Restrictions on Vhost-User Protocol Feature Negotiation}{Device Types / Vhost-Guest Device / Restrictions on Vhost-User Protocol Feature Negotiation}
+
+A device MUST clear bits in VHOST_USER_GET_PROTOCOL_FEATURES
+replies that correspond to features it does not support. It MAY
+clear bits in VHOST_USER_GET_PROTOCOL_FEATURES replies for other
+reasons. A device MUST NOT modify the contents of a
+VHOST_USER_GET_PROTOCOL_FEATURES reply in any other way.
+
+If a device receives a VHOST_USER_SET_PROTOCOL_FEATURE message
+with a feature bit set that corresponds to a feature it does not
+support, it MUST disconnect the frontend. If a device receives a
+VHOST_USER_SET_PROTOCOL_FEATURE message with a feature bit set
+that corresponds to a feature it does not permit for other
+reasons, it MAY disconnect the frontend. Devices MUST NOT modify
+VHOST_USER_SET_PROTOCOL_FEATURE messages.
+
+\subsection{Frontend Disconnection}\label{sec:Device Types / Vhost-Guest Device / Frontend Disconnection}
+
+When the device disconnects from the frontend, the device sets
+DEVICE_NEEDS_RESET. Shared memory regions remain intact until the
+driver resets the device.
+
+\drivernormative{\subsubsection}{Frontend Disconnection}{Device Types / Vhost-Guest Device / Frontend Disconnection}
+
+If the driver wants to keep using the device, it MUST stop
+accessing the shared memory regions, then reset the device.
+
+\devicenormative{\subsubsection}{Frontend Disconnection}{Device Types / Vhost-Guest Device / Frontend Disconnection}
+
+If a device wants the frontend to continue to provide the same
+service, it SHOULD NOT change \field{uuid} after being reset.
+
+If a device wants the frontend to provide a different service,
+it MUST change \field{uuid}.
+
+\begin{note}
+
+This implies that if the device does not have a UUID, the
+service it provides cannot be changed except by hot-unplugging
+it.
+
+\end{note}
