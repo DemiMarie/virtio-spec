@@ -129,6 +129,8 @@ The virtio device configuration layout includes several structures:
 \item ISR Status
 \item Device-specific configuration (optional)
 \item PCI configuration access
+\item Driver auxiliary notifications (optional)
+\item Device auxiliary notifications (optional)
 \end{itemize}
 
 Each structure can be mapped by a Base Address register (BAR) belonging to
@@ -175,19 +177,23 @@ The fields are interpreted as follows:
 
 \begin{lstlisting}
 /* Common configuration */
-#define VIRTIO_PCI_CAP_COMMON_CFG        1
+#define VIRTIO_PCI_CAP_COMMON_CFG             1
 /* Notifications */
-#define VIRTIO_PCI_CAP_NOTIFY_CFG        2
+#define VIRTIO_PCI_CAP_NOTIFY_CFG             2
 /* ISR Status */
-#define VIRTIO_PCI_CAP_ISR_CFG           3
+#define VIRTIO_PCI_CAP_ISR_CFG                3
 /* Device specific configuration */
-#define VIRTIO_PCI_CAP_DEVICE_CFG        4
+#define VIRTIO_PCI_CAP_DEVICE_CFG             4
 /* PCI configuration access */
-#define VIRTIO_PCI_CAP_PCI_CFG           5
+#define VIRTIO_PCI_CAP_PCI_CFG                5
+/* Device auxiliary notification */
+#define VIRTIO_PCI_CAP_DEVICE_AUX_NOTIFY_CFG  6
+/* Driver auxiliary notification */
+#define VIRTIO_PCI_CAP_DRIVER_AUX_NOTIFY_CFG  7
 /* Shared memory region */
-#define VIRTIO_PCI_CAP_SHARED_MEMORY_CFG 8
+#define VIRTIO_PCI_CAP_SHARED_MEMORY_CFG      8
 /* Vendor-specific data */
-#define VIRTIO_PCI_CAP_VENDOR_CFG        9
+#define VIRTIO_PCI_CAP_VENDOR_CFG             9
 \end{lstlisting}
 
         Any other value is reserved for future use.
@@ -615,6 +621,8 @@ Purpose    & Queue Interrupt  & Device Configuration Interrupt & Reserved \\
 \hline
 \end{tabular}
 
+Driver auxiliary notifications are not supported when IntX is used.
+
 To avoid an extra access, simply reading this register resets it to 0 and
 causes the device to de-assert the interrupt.
 
@@ -656,6 +664,98 @@ any device type which has a device-specific configuration.
 \devicenormative{\paragraph}{Device-specific configuration}{Virtio Transport Options / Virtio Over PCI Bus / PCI Device Layout / Device-specific configuration}
 
 The \field{offset} for the device-specific configuration MUST be 4-byte aligned.
+
+\subsubsection{Device auxiliary notification capability}\label{sec:Virtio Transport Options / Virtio Over PCI Bus / PCI Device Layout / Device auxiliary notification capability}
+
+The device auxiliary notification \ref{sec:Basic Facilities of a Virtio Device / Notifications}
+location is found using the VIRTIO_PCI_CAP_DEVICE_AUX_NOTIFY_CFG capability. This
+capability is immediately followed by an additional field, like so:
+
+\begin{lstlisting}
+struct virtio_pci_dev_aux_notification_cap {
+        struct virtio_pci_cap cap;
+        le32 dev_aux_notification_off_multiplier;
+};
+\end{lstlisting}
+
+The device auxiliary notification address within a BAR is calculated as follows:
+
+\begin{lstlisting}
+cap.offset + dev_aux_notification_idx * dev_aux_notification_off_multiplier
+\end{lstlisting}
+
+The \field{cap.offset} and \field{dev_aux_notification_off_multiplier}
+are taken from the device auxiliary notification capability
+structure above, and the \field{dev_aux_notification_idx} is the
+device auxiliary notification index. There is no restriction on
+the mapping between device auxiliary notifications and
+dev_aux_notification_idx. The number of device auxiliary
+notifications and their purpose is device-specific.
+
+\devicenormative{\paragraph}{Device auxiliary notification capability}{Virtio Transport Options / Virtio Over PCI Bus / PCI Device Layout / Device auxiliary notification capability}
+
+The data width of the device auxiliary notifications is device specific.
+
+\field{dev_aux_notification_off_multiplier} MUST be either zero,
+or a power of 2 that is a multiple of the data width.
+The value \field{cap.length} presented by the device MUST be at
+least the data width and MUST be large enough to support device
+auxiliary notification offsets for all supported device auxiliary
+notifications, regardless of what the driver does.
+
+The value \field{cap.length} presented by the device MUST satisfy:
+
+\begin{lstlisting}
+cap.length >= max_dev_aux_notification_idx * dev_aux_notification_off_multiplier + data_width
+\end{lstlisting}
+
+where \field{max_dev_aux_notification_idx} is the maximum device
+auxiliary notification index and is dependent on the device.
+
+\subsubsection{Driver auxiliary notification capability}\label{sec:Virtio Transport Options / Virtio Over PCI Bus / PCI Device Layout / Driver auxiliary notification capability}
+
+The Driver auxiliary notification
+\ref{sec:Basic Facilities of a Virtio Device / Notifications} location
+is found using the VIRTIO_PCI_CAP_DRIVER_AUX_NOTIFY_CFG capability. The
+driver auxiliary notification structure allows MSI-X vectors to be
+configured for notification interrupts. If MSI-X is not
+available, auxiliary notifications are not supported.
+
+The driver auxiliary notification structure is the following:
+
+\begin{lstlisting}
+struct virtio_pci_driver_aux_notification_cfg {
+	le16 driver_aux_notification_select;              /* read-write */
+	le16 driver_aux_notification_msix_vector;         /* read-write */
+};
+\end{lstlisting}
+
+The driver indicates which notification is of interest by writing the
+\field{driver_aux_notification_select} field. The driver then writes the MSI-X
+vector or VIRTIO_MSI_NO_VECTOR to \field{driver_aux_notification_msix_vector} to
+change the MSI-X vector for that notification. Alternatively, the driver can
+use a single 32-bit write to both fields, which has the same effect.
+
+The mapping between notifications and notification indices is device-specific.
+The total number of notifications is also device-specific.
+
+\begin{note}
+While it would be possible to support a single auxiliary
+notification without MSI-X, this would not be very useful.
+\end{note}.
+
+\devicenormative{\paragraph}{Driver auxiliary notification capability}{Virtio Transport Options / Virtio Over PCI Bus / PCI Device Layout / Driver auxiliary notification capability}
+
+Devices MUST ignore writes to \field{driver_aux_notification_msix_vector} if
+the value written to \field{driver_aux_notification_select} is not a valid
+notification index. This allows drivers to write the value they expect first,
+and check if the write succeeded afterwards.
+
+Devices MUST return VIRTIO_MSI_NO_VECTOR for reads from
+\field{driver_aux_notification_msix_vector} if the value written to
+\field{driver_aux_notification_select} is not a valid notification index.
+
+Devices MUST NOT write to the notification capability after setting DRIVER_OK.
 
 \subsubsection{Shared memory capability}\label{sec:Virtio Transport Options / Virtio Over PCI Bus / PCI Device Layout / Shared memory capability}
 
@@ -1004,15 +1104,17 @@ vector 0 to MSI-X \field{Table Size}.
 Device MUST support unmapping any event type.
 
 The device MUST return vector mapped to a given event,
-(NO_VECTOR if unmapped) on read of \field{config_msix_vector}/\field{queue_msix_vector}.
-The device MUST have all queue and configuration change
-events are unmapped upon reset.
+(NO_VECTOR if unmapped) on read of
+\field{config_msix_vector}/\field{queue_msix_vector}/\field{driver_aux_notification_msix_vector}.
+The device MUST have all queue, configuration change, and
+device-specific events are unmapped upon reset.
 
 Devices SHOULD NOT cause mapping an event to vector to fail
 unless it is impossible for the device to satisfy the mapping
 request.  Devices MUST report mapping
 failures by returning the NO_VECTOR value when the relevant
-\field{config_msix_vector}/\field{queue_msix_vector} field is read.
+\field{config_msix_vector}/\field{queue_msix_vector}\field{driver_aux_notification_msix_vector} field
+is read.
 
 \drivernormative{\subparagraph}{MSI-X Vector Configuration}{Virtio Transport Options / Virtio Over PCI Bus / PCI-specific Initialization And Device Operation / Device Initialization / MSI-X Vector Configuration}
 

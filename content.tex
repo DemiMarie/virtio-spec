@@ -214,22 +214,29 @@ The notion of sending a notification (driver to device or device
 to driver) plays an important role in this specification. The
 modus operandi of the notifications is transport specific.
 
-There are three types of notifications: 
+There are five types of notifications:
 \begin{itemize}
 \item configuration change notification
 \item available buffer notification
-\item used buffer notification. 
+\item used buffer notification
+\item driver auxiliary notification
+\item device auxiliary notification
 \end{itemize}
 
-Configuration change notifications and used buffer notifications are sent
-by the device, the recipient is the driver. A configuration change
-notification indicates that the device configuration space has changed; a
-used buffer notification indicates that a buffer may have been made used
-on the virtqueue designated by the notification.
+Configuration change notifications, used buffer notifications, and
+driver auxiliary notifications are sent by the device to the driver.
+A configuration change notification indicates that the device
+configuration space has changed. A used buffer notification indicates
+that a buffer may have been made used on the virtqueue designated by the
+notification. Driver auxiliary notifications are optional and inform the
+driver of device-specific events.
 
-Available buffer notifications are sent by the driver, the recipient is
-the device. This type of notification indicates that a buffer may have
-been made available on the virtqueue designated by the notification.
+Available buffer notifications and device auxiliary notifications
+are sent by the driver to the device. Available buffer notifications
+indicate that a buffer may have been made available on the virtqueue
+designated by the notification. Device auxiliary notifications are
+optional and allow a driver to provide device-specific information to
+the device.
 
 The semantics, the transport-specific implementations, and other
 important aspects of the different notifications are specified in detail
@@ -241,6 +248,12 @@ specification, these notifications were often called interrupts.
 Some names defined in this specification still retain this interrupt
 terminology. Occasionally, the term event is used to refer to
 a notification or a receipt of a notification.
+
+Not all transports implement driver or device auxiliary
+notifications. A device type that uses them might implement a
+fallback for transports that lack support for them. If the device
+type does not provide such a fallback, then the device is only
+useable with transports that support such notifications.
 
 \section{Device Reset}\label{sec:Basic Facilities of a Virtio Device / Device Reset}
 
